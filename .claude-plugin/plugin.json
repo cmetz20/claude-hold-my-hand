@@ -7,5 +7,6 @@
     "name": "Chris Metz"
   },
   "repository": "https://github.com/cmetz20/claude-hold-my-hand",
-  "license": "MIT"
+  "license": "MIT",
+  "mcpServers": "./mcp-config.json"
 }

@@ -1,5 +1,6 @@
 {
   "name": "claude-hold-my-hand",
+  "description": "Narrated, watchable walkthroughs of Claude Code changesets — visuals plus spoken narration, with live pause-and-ask Q&A.",
   "owner": {
     "name": "Chris Metz"
   },
