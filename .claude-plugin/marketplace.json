@@ -9,7 +9,7 @@
       "name": "walkthrough",
       "source": "./",
       "description": "Narrated, watchable walkthroughs of changesets with live pause-and-ask Q&A.",
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }

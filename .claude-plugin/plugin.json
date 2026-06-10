@@ -1,7 +1,7 @@
 {
   "name": "walkthrough",
   "displayName": "Claude Hold My Hand",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Narrated, watchable walkthroughs of changesets: visuals + spoken narration in a local web player, with live pause-and-ask Q&A answered by your Claude session.",
   "author": {
     "name": "Chris Metz"
