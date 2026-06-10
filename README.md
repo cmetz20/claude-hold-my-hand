@@ -51,6 +51,5 @@ Serves a fixture walkthrough and answers questions with canned text, exercising 
 
 ## Roadmap
 
-- Voice input (speech-to-text) for questions — the input panel is already abstracted for it.
 - Per-sentence highlight cues within a segment.
 - Export a walkthrough to a video file.

@@ -1,8 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { Answer, PendingQuestion, PlaybackStatus } from "@chmh/shared";
 
-/** Abstraction point for question input — a voice (STT) implementation can
- * replace or augment the text form later by providing the same onAsk hook. */
 export function AskPanel(props: {
   visible: boolean;
   status: PlaybackStatus;
