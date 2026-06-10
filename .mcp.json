@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "walkthrough": {
+      "command": "node",
+      "args": ["C:\\dev\\ClaudeHoldMyHand\\packages\\server\\dist\\index.js"]
+    }
+  }
+}

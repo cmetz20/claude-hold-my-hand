@@ -1,0 +1,17 @@
+{
+  "name": "claude-hold-my-hand",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Narrated visual walkthroughs of Claude Code changesets — watch, listen, interrupt, ask.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @chmh/shared && npm run build -w @chmh/server && npm run build -w @chmh/player",
+    "dev:demo": "npm run build && node packages/server/dist/demo.js",
+    "setup:piper": "node packages/server/scripts/setup-piper.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
