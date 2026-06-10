@@ -65,6 +65,41 @@ export async function loadProgress(id: string): Promise<PersistedProgress | null
   }
 }
 
+/** Retention: delete old walkthroughs so audio doesn't accumulate forever.
+ * Keeps the newest CHMH_KEEP walkthroughs (default 5) and deletes anything
+ * older than CHMH_MAX_AGE_DAYS (default 14) beyond the newest one. */
+export async function pruneOld(): Promise<void> {
+  const keep = Number(process.env.CHMH_KEEP ?? 5);
+  const maxAgeMs = Number(process.env.CHMH_MAX_AGE_DAYS ?? 14) * 86_400_000;
+  let entries;
+  try {
+    entries = await fs.readdir(dataDir, { withFileTypes: true });
+  } catch {
+    return; // no data dir yet
+  }
+  const dated: { id: string; createdAt: string }[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const w = await loadManifest(e.name);
+    // Unreadable directories are corrupt leftovers — old enough to delete.
+    dated.push({ id: e.name, createdAt: w?.createdAt ?? "" });
+  }
+  dated.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const now = Date.now();
+  for (const [i, d] of dated.entries()) {
+    const tooMany = i >= keep;
+    const tooOld =
+      i > 0 && (!d.createdAt || now - Date.parse(d.createdAt) > maxAgeMs);
+    if (tooMany || tooOld) {
+      try {
+        await fs.rm(walkthroughDir(d.id), { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
 /** Most recently created walkthrough on disk, if any. */
 export async function findLatest(): Promise<Walkthrough | null> {
   try {

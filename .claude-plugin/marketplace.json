@@ -1,0 +1,14 @@
+{
+  "name": "claude-hold-my-hand",
+  "owner": {
+    "name": "Chris Metz"
+  },
+  "plugins": [
+    {
+      "name": "walkthrough",
+      "source": "./",
+      "description": "Narrated, watchable walkthroughs of changesets with live pause-and-ask Q&A.",
+      "version": "0.1.0"
+    }
+  ]
+}

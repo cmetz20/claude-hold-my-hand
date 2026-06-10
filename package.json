@@ -8,8 +8,12 @@
   ],
   "scripts": {
     "build": "npm run build -w @chmh/shared && npm run build -w @chmh/server && npm run build -w @chmh/player",
+    "bundle": "npm run build && esbuild packages/server/dist/index.js --bundle --platform=node --format=esm --outfile=plugin-dist/server.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "dev:demo": "npm run build && node packages/server/dist/demo.js",
     "setup:piper": "node packages/server/scripts/setup-piper.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
   },
   "engines": {
     "node": ">=20"

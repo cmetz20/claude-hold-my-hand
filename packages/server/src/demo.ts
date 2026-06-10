@@ -7,6 +7,7 @@ import type { SegmentInput } from "@chmh/shared";
 import { openBrowser, playerUrl, startHost } from "./host.js";
 import { log } from "./log.js";
 import { sessions } from "./session.js";
+import * as store from "./store.js";
 
 const fixtureSegments: SegmentInput[] = [
   {
@@ -127,6 +128,7 @@ export function startHeartbeat(manager: SessionManager): () => void {
 ];
 
 async function main(): Promise<void> {
+  await store.pruneOld();
   await startHost();
   const session = await sessions.create("Demo: Session Timeout Fix", fixtureSegments);
   log(`demo walkthrough ${session.walkthrough.id} at ${playerUrl()}`);

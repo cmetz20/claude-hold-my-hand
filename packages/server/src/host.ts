@@ -4,14 +4,26 @@ import express from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import type { PlayerMessage, ServerMessage } from "@chmh/shared";
 import { log } from "./log.js";
-import { dataDir, playerDist, port } from "./paths.js";
+import { dataDir, playerDist, preferredPort } from "./paths.js";
 import { sessions } from "./session.js";
 import path from "node:path";
 
 let server: http.Server | null = null;
+let boundPort = preferredPort;
 
 export function playerUrl(): string {
-  return `http://localhost:${port}/`;
+  return `http://localhost:${boundPort}/`;
+}
+
+function listen(srv: http.Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => reject(err);
+    srv.once("error", onError);
+    srv.listen(port, "127.0.0.1", () => {
+      srv.off("error", onError);
+      resolve();
+    });
+  });
 }
 
 export async function startHost(): Promise<void> {
@@ -33,6 +45,26 @@ export async function startHost(): Promise<void> {
   app.get("*", (_req, res) => res.sendFile(path.join(playerDist, "index.html")));
 
   server = http.createServer(app);
+
+  // Bind first, attach the WebSocket server after — ws re-emits http server
+  // errors and would crash the process during port-conflict retries.
+  let lastErr: unknown;
+  for (let p = preferredPort; p < preferredPort + 10; p++) {
+    try {
+      await listen(server, p);
+      boundPort = p;
+      lastErr = undefined;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") break;
+    }
+  }
+  if (lastErr) {
+    server = null;
+    throw lastErr;
+  }
+
   const wss = new WebSocketServer({ server, path: "/ws" });
 
   wss.on("connection", async (ws: WebSocket) => {
@@ -56,10 +88,6 @@ export async function startHost(): Promise<void> {
     ws.on("close", unsubscribe);
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server!.once("error", reject);
-    server!.listen(port, "127.0.0.1", () => resolve());
-  });
   log(`player host listening on ${playerUrl()}`);
 }
 
