@@ -1,14 +1,19 @@
 /**
- * Downloads Piper TTS (Windows build) and a default English voice into
- * tools/piper/. After this, the server picks Piper over Windows SAPI
- * automatically. Run from repo root: npm run setup:piper
+ * Downloads Piper TTS (Windows build) and a default English neural voice into
+ * tools/piper/. After this, the presentation server picks Piper over Windows
+ * SAPI automatically. Run from the repo root: npm run setup:piper
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const root = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+);
 const piperDir = path.join(root, "tools", "piper");
 
 const PIPER_ZIP_URL =
@@ -60,7 +65,9 @@ async function main() {
   }
 
   console.log(`\nPiper installed in ${piperDir}.`);
-  console.log("Restart the walkthrough server; it will pick Piper automatically.");
+  console.log(
+    "Restart the presentation server; it will pick Piper automatically.",
+  );
 }
 
 main().catch((err) => {

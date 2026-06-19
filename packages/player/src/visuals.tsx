@@ -1,54 +1,121 @@
-import { useEffect, useState } from "react";
-import { codeToTokens, type ThemedToken } from "shiki";
-import type { Highlight, Visual } from "@chmh/shared";
+import { useEffect, useRef, useState } from "react";
+import type {
+  Visual,
+  TitleVisual,
+  FileTreeVisual,
+  CodeVisual,
+  DiffVisual,
+  DiagramVisual,
+} from "@chmh/shared";
 
-// ---------- shiki tokenization ----------
-
-function useTokens(code: string, lang: string): ThemedToken[][] | null {
-  const [lines, setLines] = useState<ThemedToken[][] | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setLines(null);
-    codeToTokens(code, { lang: lang as never, theme: "github-dark" })
-      .then((r) => alive && setLines(r.tokens))
-      .catch(() =>
-        alive &&
-        setLines(
-          code.split("\n").map((l) => [{ content: l, offset: 0 } as ThemedToken])
-        )
-      );
-    return () => {
-      alive = false;
-    };
-  }, [code, lang]);
-  return lines;
+export function VisualStage({ visual }: { visual: Visual }) {
+  switch (visual.kind) {
+    case "title":
+      return <TitleView v={visual} />;
+    case "fileTree":
+      return <FileTreeView v={visual} />;
+    case "code":
+      return <CodeView v={visual} />;
+    case "diff":
+      return <DiffView v={visual} />;
+    case "diagram":
+      return <DiagramView v={visual} />;
+  }
 }
 
-function TokenLine({ tokens }: { tokens: ThemedToken[] }) {
+// ── title ─────────────────────────────────────────────────────
+
+function TitleView({ v }: { v: TitleVisual }) {
   return (
-    <>
-      {tokens.map((t, i) => (
-        <span key={i} style={{ color: t.color }}>
-          {t.content}
-        </span>
-      ))}
-      {tokens.length === 0 ? " " : null}
-    </>
+    <div className="visual visual-title" data-kind="title">
+      <h1 className="title-heading">{v.heading}</h1>
+      {v.subheading && <p className="title-subheading">{v.subheading}</p>}
+      {v.bullets && v.bullets.length > 0 && (
+        <ul className="title-bullets">
+          {v.bullets.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
-// ---------- visuals ----------
+// ── fileTree ──────────────────────────────────────────────────
 
-function TitleVisual({ v }: { v: Extract<Visual, { kind: "title" }> }) {
+const STATUS_MARK: Record<FileTreeVisual["files"][number]["status"], string> = {
+  added: "+",
+  modified: "~",
+  deleted: "−",
+  unchanged: " ",
+};
+
+function FileTreeView({ v }: { v: FileTreeVisual }) {
   return (
-    <div className="visual-title">
-      <h1>{v.heading}</h1>
-      {v.subheading && <p className="subheading">{v.subheading}</p>}
-      {v.bullets && (
-        <ul>
-          {v.bullets.map((b, i) => (
-            <li key={i} style={{ animationDelay: `${0.3 + i * 0.35}s` }}>
-              {b}
+    <div className="visual visual-filetree" data-kind="fileTree">
+      {v.rootLabel && <div className="filetree-root">{v.rootLabel}</div>}
+      <ul className="filetree-list">
+        {v.files.map((f, i) => (
+          <li key={i} className={`filetree-item status-${f.status}`}>
+            <span className="filetree-mark" aria-hidden="true">
+              {STATUS_MARK[f.status]}
+            </span>
+            <span className="filetree-path">{f.path}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ── code ──────────────────────────────────────────────────────
+
+function CodeView({ v }: { v: CodeVisual }) {
+  const [html, setHtml] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    import("shiki")
+      .then(({ codeToHtml }) =>
+        codeToHtml(v.code, { lang: v.language, theme: "github-dark" }),
+      )
+      .then((out) => {
+        if (!cancelled) setHtml(out);
+      })
+      .catch(() => {
+        if (!cancelled) setHtml(null); // fall back to plain text
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [v.code, v.language]);
+
+  return (
+    <div className="visual visual-code" data-kind="code">
+      {v.filePath && (
+        <div className="code-filepath">
+          {v.filePath}
+          {v.isContext && (
+            <span className="code-context-badge">unchanged — context</span>
+          )}
+        </div>
+      )}
+      {html ? (
+        <div className="code-block" dangerouslySetInnerHTML={{ __html: html }} />
+      ) : (
+        <pre className="code-block code-block-plain">
+          <code>{v.code}</code>
+        </pre>
+      )}
+      {v.highlights && v.highlights.length > 0 && (
+        <ul className="code-highlights">
+          {v.highlights.map((h, i) => (
+            <li key={i}>
+              <span className="code-highlight-lines">
+                L{h.startLine}
+                {h.endLine !== h.startLine ? `–${h.endLine}` : ""}
+              </span>
+              {h.note && <span className="code-highlight-note">{h.note}</span>}
             </li>
           ))}
         </ul>
@@ -57,98 +124,86 @@ function TitleVisual({ v }: { v: Extract<Visual, { kind: "title" }> }) {
   );
 }
 
-const statusIcon = { added: "+", modified: "~", deleted: "−" } as const;
+// ── diff ──────────────────────────────────────────────────────
 
-function FileTreeVisual({ v }: { v: Extract<Visual, { kind: "fileTree" }> }) {
+type DiffLineKind = "add" | "del" | "hunk" | "meta" | "ctx";
+
+function classifyDiffLine(line: string): DiffLineKind {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "ctx";
+}
+
+function DiffView({ v }: { v: DiffVisual }) {
+  const lines = v.diff.split("\n");
   return (
-    <div className="visual-filetree">
-      {v.files.map((f, i) => (
-        <div
-          key={f.path}
-          className={`file-row ${f.status}`}
-          style={{ animationDelay: `${i * 0.25}s` }}
-        >
-          <span className="file-status">{statusIcon[f.status]}</span>
-          <span className="file-path">{f.path}</span>
-          <span className="file-badge">{f.status}</span>
+    <div className="visual visual-diff" data-kind="diff">
+      {v.filePath && <div className="diff-filepath">{v.filePath}</div>}
+      <pre className="diff-block">
+        {lines.map((line, i) => (
+          <div key={i} className={`diff-line diff-${classifyDiffLine(line)}`}>
+            {line || " "}
+          </div>
+        ))}
+      </pre>
+      {v.note && <div className="diff-note">{v.note}</div>}
+    </div>
+  );
+}
+
+// ── diagram (Mermaid) ─────────────────────────────────────────
+
+let mermaidReady = false;
+let diagramSeq = 0;
+
+function DiagramView({ v }: { v: DiagramVisual }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const idRef = useRef(`mmd-${++diagramSeq}`);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFailed(false);
+    setSvg(null);
+
+    import("mermaid")
+      .then(async ({ default: mermaid }) => {
+        if (!mermaidReady) {
+          mermaid.initialize({ startOnLoad: false, theme: "dark" });
+          mermaidReady = true;
+        }
+        const { svg } = await mermaid.render(idRef.current, v.source);
+        if (!cancelled) setSvg(svg);
+      })
+      .catch(() => {
+        // Invalid Mermaid must not blank the segment — show the source instead.
+        if (!cancelled) setFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [v.source]);
+
+  return (
+    <div className="visual visual-diagram" data-kind="diagram">
+      {failed ? (
+        <div className="diagram-fallback" data-fallback="true">
+          <div className="diagram-fallback-note">
+            Could not render this diagram — showing its source:
+          </div>
+          <pre className="code-block code-block-plain">
+            <code>{v.source}</code>
+          </pre>
         </div>
-      ))}
+      ) : svg ? (
+        <div className="diagram-svg" dangerouslySetInnerHTML={{ __html: svg }} />
+      ) : (
+        <div className="diagram-loading">Rendering diagram…</div>
+      )}
+      {v.caption && <div className="diagram-caption">{v.caption}</div>}
     </div>
   );
-}
-
-function CodeVisual({ v }: { v: Extract<Visual, { kind: "code" }> }) {
-  const lines = useTokens(v.content, v.language);
-  const start = v.startLine ?? 1;
-  const isHighlighted = (lineNo: number): Highlight | undefined =>
-    v.highlights?.find((h) => lineNo >= h.startLine && lineNo <= h.endLine);
-  return (
-    <div className="visual-code">
-      <div className="code-header">
-        {v.filePath}
-        {v.isContext && (
-          <span className="context-badge">unchanged — shown for context</span>
-        )}
-      </div>
-      <pre className="code-pane">
-        {lines === null ? (
-          <div className="code-loading">highlighting…</div>
-        ) : (
-          lines.map((tokens, i) => {
-            const lineNo = start + i;
-            const hl = isHighlighted(lineNo);
-            const isNoteAnchor = hl && lineNo === hl.startLine && hl.note;
-            return (
-              <div key={i} className={`code-line${hl ? " highlighted" : ""}`}>
-                <span className="line-no">{lineNo}</span>
-                <span className="line-content">
-                  <TokenLine tokens={tokens} />
-                </span>
-                {isNoteAnchor && <span className="line-note">◀ {hl.note}</span>}
-              </div>
-            );
-          })
-        )}
-      </pre>
-    </div>
-  );
-}
-
-function DiffVisual({ v }: { v: Extract<Visual, { kind: "diff" }> }) {
-  const lines = v.unifiedDiff.replace(/\n$/, "").split("\n");
-  return (
-    <div className="visual-code">
-      <div className="code-header">
-        {v.filePath}
-        {v.note && <span className="diff-note">{v.note}</span>}
-      </div>
-      <pre className="code-pane">
-        {lines.map((line, i) => {
-          let cls = "ctx";
-          if (line.startsWith("+++") || line.startsWith("---")) cls = "meta";
-          else if (line.startsWith("@@")) cls = "hunk";
-          else if (line.startsWith("+")) cls = "add";
-          else if (line.startsWith("-")) cls = "del";
-          return (
-            <div key={i} className={`diff-line ${cls}`}>
-              <span className="line-content">{line || " "}</span>
-            </div>
-          );
-        })}
-      </pre>
-    </div>
-  );
-}
-
-export function VisualStage({ visual }: { visual: Visual }) {
-  switch (visual.kind) {
-    case "title":
-      return <TitleVisual v={visual} />;
-    case "fileTree":
-      return <FileTreeVisual v={visual} />;
-    case "code":
-      return <CodeVisual v={visual} />;
-    case "diff":
-      return <DiffVisual v={visual} />;
-  }
 }

@@ -1,117 +1,121 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { WalkthroughSchema, type Walkthrough } from "@chmh/shared";
-import { dataDir } from "./paths.js";
+import {
+  mkdir,
+  writeFile,
+  readFile,
+  readdir,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { join } from "node:path";
+import { PresentationSchema, type Presentation } from "@chmh/shared";
+import type { IStore } from "./interfaces.js";
 
-export interface PersistedProgress {
+export interface FileStoreOptions {
+  /** Number of most-recent presentations always kept by pruneOld. */
+  keep?: number;
+  /** Presentations beyond `keep` older than this are deleted by pruneOld. */
+  maxAgeDays?: number;
+}
+
+interface Progress {
   currentSegmentIndex: number;
   completed: boolean;
 }
 
-export function walkthroughDir(id: string): string {
-  return path.join(dataDir, id);
-}
+/**
+ * Disk-backed store. Layout under baseDir:
+ *   <id>/manifest.json   — full Presentation
+ *   <id>/progress.json   — { currentSegmentIndex, completed }
+ *   <id>/audio/*.wav     — cached TTS output
+ */
+export class FileStore implements IStore {
+  private readonly keep: number;
+  private readonly maxAgeMs: number;
 
-export function audioDir(id: string): string {
-  return path.join(walkthroughDir(id), "audio");
-}
-
-export async function saveManifest(w: Walkthrough): Promise<void> {
-  const dir = walkthroughDir(w.id);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(
-    path.join(dir, "manifest.json"),
-    JSON.stringify(w, null, 2),
-    "utf8"
-  );
-}
-
-export async function loadManifest(id: string): Promise<Walkthrough | null> {
-  try {
-    const raw = await fs.readFile(
-      path.join(walkthroughDir(id), "manifest.json"),
-      "utf8"
-    );
-    return WalkthroughSchema.parse(JSON.parse(raw));
-  } catch {
-    return null;
+  constructor(
+    private readonly baseDir: string,
+    opts: FileStoreOptions = {},
+  ) {
+    this.keep = opts.keep ?? Number(process.env.CHMH_KEEP ?? 5);
+    const days = opts.maxAgeDays ?? Number(process.env.CHMH_MAX_AGE_DAYS ?? 14);
+    this.maxAgeMs = days * 24 * 60 * 60 * 1000;
   }
-}
 
-export async function saveProgress(
-  id: string,
-  progress: PersistedProgress
-): Promise<void> {
-  try {
-    await fs.writeFile(
-      path.join(walkthroughDir(id), "progress.json"),
+  private dir(id: string): string {
+    return join(this.baseDir, id);
+  }
+
+  audioDir(id: string): string {
+    return join(this.dir(id), "audio");
+  }
+
+  async saveManifest(presentation: Presentation): Promise<void> {
+    await mkdir(this.dir(presentation.id), { recursive: true });
+    await writeFile(
+      join(this.dir(presentation.id), "manifest.json"),
+      JSON.stringify(presentation, null, 2),
+      "utf8",
+    );
+  }
+
+  async loadManifest(id: string): Promise<Presentation | null> {
+    try {
+      const raw = await readFile(join(this.dir(id), "manifest.json"), "utf8");
+      return PresentationSchema.parse(JSON.parse(raw));
+    } catch {
+      return null;
+    }
+  }
+
+  async saveProgress(id: string, progress: Progress): Promise<void> {
+    await mkdir(this.dir(id), { recursive: true });
+    await writeFile(
+      join(this.dir(id), "progress.json"),
       JSON.stringify(progress),
-      "utf8"
+      "utf8",
     );
-  } catch {
-    /* best-effort */
   }
-}
 
-export async function loadProgress(id: string): Promise<PersistedProgress | null> {
-  try {
-    const raw = await fs.readFile(
-      path.join(walkthroughDir(id), "progress.json"),
-      "utf8"
-    );
-    return JSON.parse(raw) as PersistedProgress;
-  } catch {
-    return null;
+  async loadProgress(id: string): Promise<Progress | null> {
+    try {
+      const raw = await readFile(join(this.dir(id), "progress.json"), "utf8");
+      return JSON.parse(raw) as Progress;
+    } catch {
+      return null;
+    }
   }
-}
 
-/** Retention: delete old walkthroughs so audio doesn't accumulate forever.
- * Keeps the newest CHMH_KEEP walkthroughs (default 5) and deletes anything
- * older than CHMH_MAX_AGE_DAYS (default 14) beyond the newest one. */
-export async function pruneOld(): Promise<void> {
-  const keep = Number(process.env.CHMH_KEEP ?? 5);
-  const maxAgeMs = Number(process.env.CHMH_MAX_AGE_DAYS ?? 14) * 86_400_000;
-  let entries;
-  try {
-    entries = await fs.readdir(dataDir, { withFileTypes: true });
-  } catch {
-    return; // no data dir yet
-  }
-  const dated: { id: string; createdAt: string }[] = [];
-  for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const w = await loadManifest(e.name);
-    // Unreadable directories are corrupt leftovers — old enough to delete.
-    dated.push({ id: e.name, createdAt: w?.createdAt ?? "" });
-  }
-  dated.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const now = Date.now();
-  for (const [i, d] of dated.entries()) {
-    const tooMany = i >= keep;
-    const tooOld =
-      i > 0 && (!d.createdAt || now - Date.parse(d.createdAt) > maxAgeMs);
-    if (tooMany || tooOld) {
-      try {
-        await fs.rm(walkthroughDir(d.id), { recursive: true, force: true });
-      } catch {
-        /* best-effort */
+  async pruneOld(): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(this.baseDir, { withFileTypes: true });
+    } catch {
+      return; // base dir doesn't exist yet — nothing to prune
+    }
+
+    const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    const withTime: { id: string; created: number }[] = [];
+    for (const id of dirs) {
+      const manifest = await this.loadManifest(id);
+      let created = 0;
+      if (manifest) {
+        created = Date.parse(manifest.createdAt);
+      } else {
+        try {
+          created = (await stat(this.dir(id))).mtimeMs;
+        } catch {
+          /* ignore */
+        }
+      }
+      withTime.push({ id, created });
+    }
+
+    withTime.sort((a, b) => b.created - a.created);
+    const now = Date.now();
+    for (const candidate of withTime.slice(this.keep)) {
+      if (now - candidate.created > this.maxAgeMs) {
+        await rm(this.dir(candidate.id), { recursive: true, force: true });
       }
     }
-  }
-}
-
-/** Most recently created walkthrough on disk, if any. */
-export async function findLatest(): Promise<Walkthrough | null> {
-  try {
-    const entries = await fs.readdir(dataDir, { withFileTypes: true });
-    let best: Walkthrough | null = null;
-    for (const e of entries) {
-      if (!e.isDirectory()) continue;
-      const w = await loadManifest(e.name);
-      if (w && (!best || w.createdAt > best.createdAt)) best = w;
-    }
-    return best;
-  } catch {
-    return null;
   }
 }

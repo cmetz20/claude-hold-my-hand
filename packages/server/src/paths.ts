@@ -11,7 +11,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function findInstallRoot(): string {
   let dir = here;
   for (let i = 0; i < 6; i++) {
-    if (fs.existsSync(path.join(dir, "packages", "player", "dist", "index.html"))) {
+    if (
+      fs.existsSync(
+        path.join(dir, "packages", "player", "dist", "index.html"),
+      )
+    ) {
       return dir;
     }
     const parent = path.dirname(dir);
@@ -24,13 +28,18 @@ function findInstallRoot(): string {
 
 export const installRoot = findInstallRoot();
 
-/** Where walkthroughs are persisted. Defaults to the directory Claude Code
- * spawned us in, so each project keeps its own walkthroughs. */
+/** Where presentations are persisted. Defaults to the directory Claude Code
+ * spawned us in, so each project keeps its own presentations. */
 export const dataDir =
-  process.env.CHMH_DATA_DIR ?? path.resolve(process.cwd(), ".walkthroughs");
+  process.env.CHMH_DATA_DIR ?? path.resolve(process.cwd(), ".presentations");
 
 export const preferredPort = Number(process.env.CHMH_PORT ?? 4923);
 
-export const playerDist = path.resolve(installRoot, "packages", "player", "dist");
+export const playerDist = path.resolve(
+  installRoot,
+  "packages",
+  "player",
+  "dist",
+);
 
 export const piperDir = path.resolve(installRoot, "tools", "piper");

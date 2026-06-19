@@ -1,131 +1,94 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import { SegmentInputSchema } from "@chmh/shared";
-import { openBrowser, playerUrl, startHost } from "./host.js";
+import {
+  CreatePresentationInputSchema,
+  AddSegmentsInputSchema,
+  AwaitEventInputSchema,
+  AnswerQuestionInputSchema,
+  UpdateSettingsInputSchema,
+} from "@chmh/shared";
 import { log } from "./log.js";
-import { sessions } from "./session.js";
+import type { PresentationTools } from "./tools.js";
 
 function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
-function getSessionOrThrow(walkthroughId: string) {
-  const session = sessions.get(walkthroughId);
-  if (!session) throw new Error(`Unknown walkthrough: ${walkthroughId}`);
-  return session;
-}
-
-export async function startMcpServer(): Promise<void> {
-  const server = new McpServer({ name: "claude-hold-my-hand", version: "0.1.0" });
+export async function startMcpServer(tools: PresentationTools): Promise<void> {
+  const server = new McpServer({
+    name: "claude-hold-my-hand",
+    version: "2.0.0-alpha.0",
+  });
 
   server.registerTool(
-    "create_walkthrough",
+    "create_presentation",
     {
       description:
-        "Create a narrated visual walkthrough of a changeset and open it in the user's browser. " +
-        "Author small segments: one paragraph of narration plus one visual each " +
-        "(title slide, file tree, code with highlights, or unified diff). " +
-        "After calling this, immediately start calling await_event in a loop to receive " +
-        "user questions and the completion signal.",
-      inputSchema: {
-        title: z.string().describe("Walkthrough title, e.g. 'Auth refactor walkthrough'"),
-        segments: z
-          .array(SegmentInputSchema)
-          .min(1)
-          .describe("Ordered segments: { title, narration, visual }"),
-      },
+        "Create a narrated visual presentation and open it in the user's browser. Works for ANY " +
+        "codebase topic — a PR or changeset, how a concept works, onboarding, an architecture " +
+        "overview, a debugging story, or a tutorial. Author small segments: one paragraph of " +
+        "narration plus one visual each (title, fileTree, code with highlights, diff, or a Mermaid " +
+        "diagram). Set `intent` to the kind of presentation and optionally `settings` " +
+        "(verbosity/depth/audience). After calling this, immediately begin calling await_event in a " +
+        "loop to receive the user's questions and the completion signal.",
+      inputSchema: CreatePresentationInputSchema.shape,
     },
-    async ({ title, segments }) => {
-      await startHost();
-      const session = await sessions.create(title, segments);
-      openBrowser(playerUrl());
-      return jsonResult({
-        walkthroughId: session.walkthrough.id,
-        playerUrl: playerUrl(),
-        segmentCount: session.walkthrough.segments.length,
-        next: "Call await_event({ walkthroughId }) now and keep looping until it returns { type: 'completed' }.",
-      });
-    }
+    async (args) => jsonResult(await tools.createPresentation(args)),
   );
 
   server.registerTool(
     "await_event",
     {
       description:
-        "Long-poll for walkthrough events. Returns { type: 'question', questionId, text, segment } " +
+        "Long-poll for presentation events. Returns { type: 'question', questionId, text, segment } " +
         "when the user pauses and asks something (answer it with answer_question, then keep polling), " +
         "{ type: 'completed' } when playback finishes (stop polling), or { type: 'none' } on timeout " +
-        "(just call await_event again).",
-      inputSchema: {
-        walkthroughId: z.string(),
-        timeoutMs: z.number().int().min(1000).max(50000).optional()
-          .describe("Max wait before returning { type: 'none' }. Default 45000."),
-      },
+        "(call await_event again). Do not do other work between polls — the user may interrupt at any time.",
+      inputSchema: AwaitEventInputSchema.shape,
     },
-    async ({ walkthroughId, timeoutMs }) => {
-      const session = getSessionOrThrow(walkthroughId);
-      const event = await session.awaitEvent(timeoutMs ?? 45000);
-      return jsonResult(event);
-    }
+    async (args) => jsonResult(await tools.awaitEvent(args)),
   );
 
   server.registerTool(
     "answer_question",
     {
       description:
-        "Answer a user question raised during a walkthrough. The answer is spoken aloud and shown " +
-        "in the player; keep it conversational, 2-5 sentences, no markdown or code blocks. " +
-        "After answering, return to the await_event loop.",
-      inputSchema: {
-        walkthroughId: z.string(),
-        questionId: z.string(),
-        answer: z.string().describe("Plain spoken-style prose. No markdown."),
-      },
+        "Answer a user question raised during a presentation. Spoken aloud and shown in the player — " +
+        "keep it conversational, 2-5 sentences, no markdown or code blocks. If the answer deserves " +
+        "visuals, also call add_segments with insertAfterSegmentId to splice them in. After answering, " +
+        "return to the await_event loop.",
+      inputSchema: AnswerQuestionInputSchema.shape,
     },
-    async ({ walkthroughId, questionId, answer }) => {
-      const session = getSessionOrThrow(walkthroughId);
-      await session.answerQuestion(questionId, answer);
-      return jsonResult({ ok: true, next: "Resume the await_event loop." });
-    }
+    async (args) => jsonResult(await tools.answerQuestion(args)),
   );
 
   server.registerTool(
-    "update_walkthrough",
+    "add_segments",
     {
       description:
-        "Add segments to an existing walkthrough without disturbing playback or regenerating " +
-        "existing audio. Pass insertAfterSegmentId to splice new segments in right after a given " +
-        "segment (e.g. the one the user paused on when asking a question — its id arrives in the " +
-        "question event); omit it to append at the end; pass '' to insert at the very start. " +
-        "Passing an existing segment id in a segment replaces that segment in place.",
-      inputSchema: {
-        walkthroughId: z.string(),
-        segments: z.array(SegmentInputSchema).min(1),
-        insertAfterSegmentId: z
-          .string()
-          .optional()
-          .describe(
-            "Segment id to insert after ('' = start, omit = append at end)"
-          ),
-      },
+        "Add or replace segments in an existing presentation without disturbing playback or " +
+        "regenerating unchanged audio. Pass insertAfterSegmentId to splice new segments right after a " +
+        "given segment (e.g. the one the user paused on — its id arrives in the question event); omit " +
+        "it to append at the end; pass '' to insert at the very start. Passing an existing segment id " +
+        "replaces that segment in place.",
+      inputSchema: AddSegmentsInputSchema.shape,
     },
-    async ({ walkthroughId, segments, insertAfterSegmentId }) => {
-      const session = getSessionOrThrow(walkthroughId);
-      await session.updateSegments(segments, insertAfterSegmentId);
-      return jsonResult({
-        ok: true,
-        segmentCount: session.walkthrough.segments.length,
-      });
-    }
+    async (args) => jsonResult(await tools.addSegments(args)),
+  );
+
+  server.registerTool(
+    "update_settings",
+    {
+      description:
+        "Update live playback settings (voiceSpeed 0.5-2.0, autoPlay). Note: verbosity/depth/audience " +
+        "are authoring-time only and are fixed at creation — they cannot be changed here.",
+      inputSchema: UpdateSettingsInputSchema.shape,
+    },
+    async (args) => jsonResult(await tools.updateSettings(args)),
   );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  sessions.setClaudeConnected(true);
-  transport.onclose = () => {
-    sessions.setClaudeConnected(false);
-    log("MCP transport closed");
-  };
+  transport.onclose = () => log("MCP transport closed");
   log("MCP server connected (stdio)");
 }

@@ -1,319 +1,325 @@
-import crypto from "node:crypto";
-import type {
-  Answer,
-  PendingQuestion,
-  PlaybackState,
-  PlayerMessage,
-  SegmentInput,
-  ServerMessage,
-  Walkthrough,
-  WalkthroughEvent,
+import { randomBytes } from "node:crypto";
+import {
+  PresentationSettingsSchema,
+  type Presentation,
+  type PresentationSettings,
+  type PlaybackState,
+  type PendingQuestion,
+  type Answer,
+  type Segment,
+  type SegmentInput,
+  type PresentationEvent,
+  type PlayerMessage,
+  type CreatePresentationInput,
 } from "@chmh/shared";
-import { log } from "./log.js";
-import * as store from "./store.js";
-import { synthesizeCached } from "./tts/index.js";
+import type { ITTSEngine, IBroadcaster, IStore } from "./interfaces.js";
 
-type Broadcaster = (msg: ServerMessage) => void;
+function genId(prefix: string): string {
+  return `${prefix}-${randomBytes(3).toString("hex")}`;
+}
 
-export class WalkthroughSession {
-  walkthrough: Walkthrough;
-  playback: PlaybackState;
+function presentationId(): string {
+  const d = new Date().toISOString().slice(0, 10);
+  return `pr-${d}-${randomBytes(3).toString("hex")}`;
+}
 
-  private eventQueue: WalkthroughEvent[] = [];
-  private eventWaiters: ((e: WalkthroughEvent) => void)[] = [];
-  private broadcasters = new Set<Broadcaster>();
+type EventWaiter = (event: PresentationEvent) => void;
 
-  constructor(walkthrough: Walkthrough, opts: { claudeConnected: boolean }) {
-    this.walkthrough = walkthrough;
+export class PresentationSession {
+  readonly presentation: Presentation;
+  private playback: PlaybackState;
+  private eventQueue: PresentationEvent[] = [];
+  private eventWaiters: EventWaiter[] = [];
+
+  constructor(
+    presentation: Presentation,
+    private readonly tts: ITTSEngine,
+    private readonly broadcaster: IBroadcaster,
+    private readonly store: IStore,
+  ) {
+    this.presentation = presentation;
     this.playback = {
-      walkthroughId: walkthrough.id,
+      presentationId: presentation.id,
       status: "loading",
       currentSegmentIndex: 0,
-      audioReady: walkthrough.segments
-        .filter((s) => s.audioFile)
-        .map((s) => s.id),
-      claudeConnected: opts.claudeConnected,
+      audioReady: [],
+      claudeConnected: true,
     };
   }
 
-  // ---------- state sync ----------
-
-  subscribe(b: Broadcaster): () => void {
-    this.broadcasters.add(b);
-    b(this.stateMessage());
-    return () => this.broadcasters.delete(b);
+  static create(
+    input: CreatePresentationInput,
+    tts: ITTSEngine,
+    broadcaster: IBroadcaster,
+    store: IStore,
+  ): PresentationSession {
+    const id = presentationId();
+    const settings = PresentationSettingsSchema.parse(input.settings ?? {});
+    const segments: Segment[] = input.segments.map((s) => ({
+      ...s,
+      id: s.id ?? genId("seg"),
+    }));
+    const presentation: Presentation = {
+      id,
+      title: input.title,
+      intent: input.intent ?? "custom",
+      settings,
+      segments,
+      createdAt: new Date().toISOString(),
+    };
+    return new PresentationSession(presentation, tts, broadcaster, store);
   }
 
-  stateMessage(): ServerMessage {
-    return { type: "state", walkthrough: this.walkthrough, playback: this.playback };
+  getPlaybackState(): PlaybackState {
+    return { ...this.playback };
   }
 
-  private broadcast(msg?: ServerMessage): void {
-    const m = msg ?? this.stateMessage();
-    for (const b of this.broadcasters) b(m);
+  getPresentation(): Presentation {
+    return this.presentation;
   }
 
-  setClaudeConnected(connected: boolean): void {
-    if (this.playback.claudeConnected === connected) return;
-    this.playback.claudeConnected = connected;
-    this.broadcast();
+  broadcastState(): void {
+    this.broadcaster.broadcast({
+      type: "state",
+      presentation: this.presentation,
+      playback: this.playback,
+    });
   }
 
-  // ---------- TTS generation ----------
+  /** Attach a player listener (the host wires a WebSocket here). */
+  subscribe(fn: (msg: import("@chmh/shared").ServerMessage) => void): () => void {
+    return this.broadcaster.subscribe(fn);
+  }
 
-  /** Generate narration audio for all segments missing it, in order.
-   * Broadcasts state after each segment so playback can start early. */
+  private get audioDir(): string {
+    return this.store.audioDir(this.presentation.id);
+  }
+
   async generateAudio(): Promise<void> {
-    for (const seg of this.walkthrough.segments) {
-      if (seg.audioFile) continue;
-      try {
-        const res = await synthesizeCached(
-          seg.narration,
-          store.audioDir(this.walkthrough.id)
-        );
-        seg.audioFile = res.file;
-        seg.audioDurationMs = res.durationMs;
-        this.playback.audioReady.push(seg.id);
-        if (this.playback.status === "loading") this.playback.status = "playing";
-        await store.saveManifest(this.walkthrough);
-        this.broadcast();
-      } catch (err) {
-        log(`TTS failed for segment ${seg.id}:`, err);
-      }
+    for (const segment of this.presentation.segments) {
+      if (segment.audioFile) continue;
+      const result = await this.tts.synthesize(segment.narration, this.audioDir);
+      segment.audioFile = result.filePath;
+      segment.audioDurationMs = result.durationMs;
+      this.markAudioReady(segment.id);
+      this.broadcastState();
+    }
+    await this.store.saveManifest(this.presentation);
+  }
+
+  private markAudioReady(id: string): void {
+    if (!this.playback.audioReady.includes(id)) {
+      this.playback.audioReady.push(id);
     }
   }
-
-  // ---------- player messages ----------
 
   handlePlayerMessage(msg: PlayerMessage): void {
     switch (msg.type) {
       case "hello":
+        this.broadcastState();
         break;
+
       case "progress":
-        this.playback.currentSegmentIndex = Math.max(
-          0,
-          Math.min(msg.segmentIndex, this.walkthrough.segments.length - 1)
-        );
-        void store.saveProgress(this.walkthrough.id, {
-          currentSegmentIndex: this.playback.currentSegmentIndex,
+        this.playback.currentSegmentIndex = msg.segmentIndex;
+        this.store.saveProgress(this.presentation.id, {
+          currentSegmentIndex: msg.segmentIndex,
           completed: false,
         });
-        this.broadcast();
+        // Echo so every connected player (and the ToC highlight) stays in sync.
+        this.broadcastState();
         break;
+
       case "control":
         this.handleControl(msg.action);
         break;
+
       case "question":
         this.handleQuestion(msg.text, msg.segmentId);
         break;
     }
   }
 
-  private handleControl(action: "play" | "pause" | "resume" | "completed"): void {
-    if (action === "completed") {
-      this.playback.status = "completed";
-      void store.saveProgress(this.walkthrough.id, {
-        currentSegmentIndex: this.playback.currentSegmentIndex,
-        completed: true,
-      });
-      this.pushEvent({ type: "completed" });
-    } else if (action === "pause") {
-      if (this.playback.status === "playing") this.playback.status = "paused";
-    } else if (action === "play" || action === "resume") {
-      if (
-        this.playback.status === "paused" ||
-        this.playback.status === "answering" ||
-        this.playback.status === "completed"
-      ) {
+  private handleControl(action: "play" | "pause" | "resume" | "completed") {
+    switch (action) {
+      case "play":
+      case "resume":
         this.playback.status = "playing";
-        this.playback.pendingQuestion = undefined;
-      }
+        break;
+      case "pause":
+        this.playback.status = "paused";
+        break;
+      case "completed":
+        this.playback.status = "completed";
+        this.pushEvent({ type: "completed" });
+        this.store.saveProgress(this.presentation.id, {
+          currentSegmentIndex: this.playback.currentSegmentIndex,
+          completed: true,
+        });
+        break;
     }
-    this.broadcast();
+    this.broadcastState();
   }
 
-  private handleQuestion(text: string, segmentId: string): void {
-    const index = this.walkthrough.segments.findIndex((s) => s.id === segmentId);
-    const segment = this.walkthrough.segments[index] ?? this.walkthrough.segments[0];
-    const q: PendingQuestion = {
-      questionId: `q-${crypto.randomBytes(4).toString("hex")}`,
+  private handleQuestion(text: string, segmentId: string) {
+    const questionId = genId("q");
+    const pending: PendingQuestion = {
+      questionId,
       text,
-      segmentId: segment.id,
+      segmentId,
       askedAt: new Date().toISOString(),
     };
     this.playback.status = "question_pending";
-    this.playback.pendingQuestion = q;
-    this.broadcast();
+    this.playback.pendingQuestion = pending;
+    this.broadcastState();
+
+    const seg = this.presentation.segments.find((s) => s.id === segmentId);
+    const index = seg
+      ? this.presentation.segments.indexOf(seg)
+      : this.playback.currentSegmentIndex;
+
     this.pushEvent({
       type: "question",
-      questionId: q.questionId,
-      text: q.text,
-      segment: { id: segment.id, title: segment.title, index: Math.max(index, 0) },
+      questionId,
+      text,
+      segment: {
+        id: segmentId,
+        title: seg?.title ?? "Unknown",
+        index,
+      },
     });
   }
 
-  // ---------- Claude-facing (MCP) ----------
-
-  private pushEvent(e: WalkthroughEvent): void {
-    const waiter = this.eventWaiters.shift();
-    if (waiter) waiter(e);
-    else this.eventQueue.push(e);
-  }
-
-  /** Long-poll: resolves with the next event, or {type:"none"} after timeout. */
-  awaitEvent(timeoutMs: number): Promise<WalkthroughEvent> {
+  async awaitEvent(timeoutMs: number): Promise<PresentationEvent> {
     const queued = this.eventQueue.shift();
-    if (queued) return Promise.resolve(queued);
-    return new Promise((resolve) => {
+    if (queued) return queued;
+
+    return new Promise<PresentationEvent>((resolve) => {
       const timer = setTimeout(() => {
-        const i = this.eventWaiters.indexOf(waiter);
-        if (i >= 0) this.eventWaiters.splice(i, 1);
+        const idx = this.eventWaiters.indexOf(waiter);
+        if (idx !== -1) this.eventWaiters.splice(idx, 1);
         resolve({ type: "none" });
       }, timeoutMs);
-      const waiter = (e: WalkthroughEvent) => {
+
+      const waiter: EventWaiter = (event) => {
         clearTimeout(timer);
-        resolve(e);
+        resolve(event);
       };
       this.eventWaiters.push(waiter);
     });
   }
 
-  async answerQuestion(questionId: string, answerText: string): Promise<void> {
-    const q = this.playback.pendingQuestion;
-    if (!q || q.questionId !== questionId) {
-      throw new Error(
-        `No pending question with id ${questionId}` +
-          (q ? ` (pending is ${q.questionId})` : "")
-      );
+  async answerQuestion(questionId: string, answerText: string): Promise<boolean> {
+    const pending = this.playback.pendingQuestion;
+    if (!pending || pending.questionId !== questionId) {
+      // Stale or unknown question id — ignore rather than corrupt state or
+      // clobber a newer pending question that arrived during synthesis.
+      return false;
     }
-    let audioUrl: string | undefined;
-    try {
-      const res = await synthesizeCached(
-        answerText,
-        store.audioDir(this.walkthrough.id)
-      );
-      audioUrl = `/audio/${this.walkthrough.id}/${res.file}`;
-    } catch (err) {
-      log("TTS failed for answer:", err);
-    }
+    // Capture the question text before the await so a concurrent question
+    // can't reattribute this answer.
+    const questionText = pending.text;
+    const ttsResult = await this.tts.synthesize(answerText, this.audioDir);
     const answer: Answer = {
       questionId,
-      question: q.text,
+      question: questionText,
       text: answerText,
-      audioUrl,
+      audioUrl: this.audioUrl(ttsResult.filePath),
     };
     this.playback.status = "answering";
+    this.playback.pendingQuestion = undefined;
     this.playback.lastAnswer = answer;
-    this.broadcast();
-    this.broadcast({ type: "answer", answer });
+    this.broadcaster.broadcast({ type: "answer", answer });
+    this.broadcastState();
+    return true;
   }
 
-  /** Insert, append, or replace segments, then generate any missing audio.
-   * Only the new/changed segments get TTS — everything else keeps its cached
-   * audio, so playback never has to be recreated.
-   * insertAfterSegmentId: "" inserts at the start, undefined appends. */
-  async updateSegments(
+  /** Map a stored audio filename to the URL the player fetches it from. */
+  private audioUrl(filename: string): string {
+    return `/audio/${this.presentation.id}/${filename}`;
+  }
+
+  async addSegments(
     inputs: SegmentInput[],
-    insertAfterSegmentId?: string
-  ): Promise<void> {
-    const segs = this.walkthrough.segments;
-    let insertPos: number | undefined;
-    if (insertAfterSegmentId !== undefined) {
+    insertAfterSegmentId?: string,
+  ): Promise<number> {
+    const segments = this.presentation.segments;
+    const toSynth: Segment[] = [];
+    const newSegments: Segment[] = [];
+
+    // An input whose id matches an existing segment REPLACES it in place
+    // (audio reset so the new narration is re-synthesized). Everything else is
+    // a genuinely new segment to be inserted at the requested position.
+    for (const input of inputs) {
+      if (input.id) {
+        const existingIdx = segments.findIndex((s) => s.id === input.id);
+        if (existingIdx !== -1) {
+          const replaced: Segment = { ...input, id: input.id };
+          segments[existingIdx] = replaced;
+          this.playback.audioReady = this.playback.audioReady.filter(
+            (x) => x !== replaced.id,
+          );
+          toSynth.push(replaced);
+          continue;
+        }
+      }
+      const created: Segment = { ...input, id: input.id ?? genId("seg") };
+      newSegments.push(created);
+      toSynth.push(created);
+    }
+
+    if (newSegments.length > 0) {
+      let insertPos: number;
       if (insertAfterSegmentId === "") {
         insertPos = 0;
+      } else if (insertAfterSegmentId !== undefined) {
+        const idx = segments.findIndex((s) => s.id === insertAfterSegmentId);
+        insertPos = idx !== -1 ? idx + 1 : segments.length;
       } else {
-        const anchor = segs.findIndex((s) => s.id === insertAfterSegmentId);
-        if (anchor < 0)
-          throw new Error(`Unknown anchor segment: ${insertAfterSegmentId}`);
-        insertPos = anchor + 1;
+        insertPos = segments.length;
+      }
+      segments.splice(insertPos, 0, ...newSegments);
+      // Keep the viewer anchored to the same segment if we inserted at or
+      // before their current position.
+      if (insertPos <= this.playback.currentSegmentIndex) {
+        this.playback.currentSegmentIndex += newSegments.length;
       }
     }
-    let nextNum = segs.length + 1;
-    for (const input of inputs) {
-      const id = input.id ?? `seg-${nextNum++}-${crypto.randomBytes(2).toString("hex")}`;
-      const existing = segs.findIndex((s) => s.id === id);
-      const seg = { ...input, id, audioFile: undefined, audioDurationMs: undefined };
-      if (existing >= 0) {
-        segs[existing] = seg;
-        this.playback.audioReady = this.playback.audioReady.filter((x) => x !== id);
-      } else if (insertPos !== undefined) {
-        segs.splice(insertPos, 0, seg);
-        if (insertPos <= this.playback.currentSegmentIndex) {
-          this.playback.currentSegmentIndex += 1;
-        }
-        insertPos += 1;
-      } else {
-        segs.push(seg);
-      }
+
+    if (this.playback.status === "completed") {
+      this.playback.status = "paused";
     }
-    if (this.playback.status === "completed") this.playback.status = "paused";
-    await store.saveManifest(this.walkthrough);
-    this.broadcast();
-    void this.generateAudio();
+
+    this.broadcastState();
+    await this.store.saveManifest(this.presentation);
+
+    for (const seg of toSynth) {
+      if (seg.audioFile) continue;
+      const result = await this.tts.synthesize(seg.narration, this.audioDir);
+      seg.audioFile = result.filePath;
+      seg.audioDurationMs = result.durationMs;
+      this.markAudioReady(seg.id);
+      this.broadcastState();
+    }
+
+    return segments.length;
+  }
+
+  updateSettings(partial: Partial<PresentationSettings>): PresentationSettings {
+    const merged = PresentationSettingsSchema.parse({
+      ...this.presentation.settings,
+      ...partial,
+    });
+    (this.presentation as { settings: PresentationSettings }).settings = merged;
+    this.broadcastState();
+    return merged;
+  }
+
+  private pushEvent(event: PresentationEvent): void {
+    const waiter = this.eventWaiters.shift();
+    if (waiter) {
+      waiter(event);
+    } else {
+      this.eventQueue.push(event);
+    }
   }
 }
-
-// ---------- manager ----------
-
-class SessionManager {
-  private sessions = new Map<string, WalkthroughSession>();
-  private activeId: string | null = null;
-  claudeConnected = false;
-
-  setClaudeConnected(connected: boolean): void {
-    this.claudeConnected = connected;
-    for (const s of this.sessions.values()) s.setClaudeConnected(connected);
-  }
-
-  async create(title: string, inputs: SegmentInput[]): Promise<WalkthroughSession> {
-    const id = `wt-${new Date().toISOString().slice(0, 10)}-${crypto
-      .randomBytes(3)
-      .toString("hex")}`;
-    const walkthrough: Walkthrough = {
-      id,
-      title,
-      createdAt: new Date().toISOString(),
-      segments: inputs.map((s, i) => ({ ...s, id: s.id ?? `seg-${i + 1}` })),
-    };
-    await store.saveManifest(walkthrough);
-    const session = new WalkthroughSession(walkthrough, {
-      claudeConnected: this.claudeConnected,
-    });
-    this.sessions.set(id, session);
-    this.activeId = id;
-    void session.generateAudio();
-    return session;
-  }
-
-  get(id: string): WalkthroughSession | undefined {
-    return this.sessions.get(id);
-  }
-
-  getActive(): WalkthroughSession | undefined {
-    return this.activeId ? this.sessions.get(this.activeId) : undefined;
-  }
-
-  /** Resume the most recent walkthrough from disk (e.g. after a restart). */
-  async loadLatest(): Promise<WalkthroughSession | undefined> {
-    const active = this.getActive();
-    if (active) return active;
-    const w = await store.findLatest();
-    if (!w) return undefined;
-    const session = new WalkthroughSession(w, {
-      claudeConnected: this.claudeConnected,
-    });
-    const progress = await store.loadProgress(w.id);
-    if (progress) {
-      session.playback.currentSegmentIndex = progress.currentSegmentIndex;
-      session.playback.status = progress.completed ? "completed" : "paused";
-    } else if (session.playback.audioReady.length > 0) {
-      session.playback.status = "paused";
-    }
-    this.sessions.set(w.id, session);
-    this.activeId = w.id;
-    void session.generateAudio();
-    return session;
-  }
-}
-
-export const sessions = new SessionManager();

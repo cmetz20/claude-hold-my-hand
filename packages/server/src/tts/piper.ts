@@ -5,7 +5,7 @@ import { piperDir } from "../paths.js";
 import type { TtsEngine } from "./engine.js";
 
 /** Piper neural TTS — used automatically when tools/piper/ contains
- * piper.exe and a voice model (run `npm run setup:piper`). */
+ * piper.exe and a voice model. */
 export class PiperEngine implements TtsEngine {
   name = "piper";
   cacheKey = "piper";
@@ -32,7 +32,7 @@ export class PiperEngine implements TtsEngine {
       const child = spawn(
         this.exe,
         ["--model", this.model!, "--output_file", outWavPath],
-        { stdio: ["pipe", "ignore", "pipe"], cwd: piperDir }
+        { stdio: ["pipe", "ignore", "pipe"], cwd: piperDir },
       );
       let stderr = "";
       child.stderr.on("data", (d) => (stderr += d));
@@ -40,7 +40,7 @@ export class PiperEngine implements TtsEngine {
       child.on("close", (code) =>
         code === 0
           ? resolve()
-          : reject(new Error(`piper exited ${code}: ${stderr.slice(0, 500)}`))
+          : reject(new Error(`piper exited ${code}: ${stderr.slice(0, 500)}`)),
       );
       child.stdin.write(text);
       child.stdin.end();

@@ -1,15 +1,15 @@
 {
   "name": "claude-hold-my-hand",
-  "description": "Narrated, watchable walkthroughs of Claude Code changesets — visuals plus spoken narration, with live pause-and-ask Q&A.",
+  "description": "Narrated, watchable presentations of any codebase topic — visuals plus spoken narration, with live pause-and-ask Q&A.",
   "owner": {
     "name": "Chris Metz"
   },
   "plugins": [
     {
-      "name": "walkthrough",
+      "name": "claude-hold-my-hand",
       "source": "./",
-      "description": "Narrated, watchable walkthroughs of changesets with live pause-and-ask Q&A.",
-      "version": "0.1.1"
+      "description": "Narrated visual presentations of any codebase topic with live pause-and-ask Q&A.",
+      "version": "2.0.0-alpha.0"
     }
   ]
 }

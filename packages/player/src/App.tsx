@@ -1,196 +1,278 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { VisualStage } from "./visuals";
-import { useSession } from "./ws";
-import { AskPanel } from "./AskPanel";
+import { useEffect, useMemo, useRef } from "react";
+import type { Segment, Answer } from "@chmh/shared";
+import { usePlayer } from "./ws.js";
+import { VisualStage } from "./visuals.js";
+import { AskPanel } from "./AskPanel.js";
+import { deriveTocGroups } from "./sections.js";
 
-export default function App() {
-  const { state, send, clearAnswer } = useSession();
-  const [started, setStarted] = useState(false);
-  const narrationRef = useRef<HTMLAudioElement>(null);
-  const answerRef = useRef<HTMLAudioElement>(null);
+const INTENT_LABEL: Record<string, string> = {
+  pr: "PR walkthrough",
+  concept: "Concept",
+  onboarding: "Onboarding",
+  architecture: "Architecture",
+  debugging: "Debugging",
+  tutorial: "Tutorial",
+  review: "Review",
+  custom: "Presentation",
+};
 
-  const { walkthrough, playback } = state;
-  const segIndex = playback?.currentSegmentIndex ?? 0;
-  const segment = walkthrough?.segments[segIndex];
-  const status = playback?.status ?? "loading";
-  const audioUrl =
-    walkthrough && segment?.audioFile
-      ? `/audio/${walkthrough.id}/${segment.audioFile}`
-      : null;
+export function App() {
+  const { view, send, goTo, clearAnswer } = usePlayer();
+  const { presentation, playback } = view;
 
-  // Drive narration audio from server state + local "started" gesture gate.
-  useEffect(() => {
-    const audio = narrationRef.current;
-    if (!audio) return;
-    if (started && status === "playing" && audioUrl) {
-      const abs = new URL(audioUrl, location.href).href;
-      if (audio.src !== abs) audio.src = abs;
-      void audio.play().catch(() => undefined);
-    } else {
-      audio.pause();
-    }
-  }, [started, status, audioUrl]);
+  // Hooks must run unconditionally, so derive the ToC before any early return.
+  const segments = presentation?.segments ?? [];
+  const toc = useMemo(() => deriveTocGroups(segments), [segments]);
 
-  // Play incoming answers aloud.
-  useEffect(() => {
-    if (!state.incomingAnswer) return;
-    const audio = answerRef.current;
-    if (audio && state.incomingAnswer.audioUrl) {
-      audio.src = new URL(state.incomingAnswer.audioUrl, location.href).href;
-      void audio.play().catch(() => undefined);
-    }
-    clearAnswer();
-  }, [state.incomingAnswer, clearAnswer]);
-
-  const onNarrationEnded = useCallback(() => {
-    if (!walkthrough) return;
-    if (segIndex >= walkthrough.segments.length - 1) {
-      send({ type: "control", action: "completed" });
-    } else {
-      send({ type: "progress", segmentIndex: segIndex + 1 });
-    }
-  }, [walkthrough, segIndex, send]);
-
-  const togglePlayPause = useCallback(() => {
-    if (!started) {
-      setStarted(true);
-      send({ type: "control", action: "play" });
-      return;
-    }
-    if (status === "playing") send({ type: "control", action: "pause" });
-    else if (status === "paused" || status === "completed")
-      send({ type: "control", action: "resume" });
-  }, [started, status, send]);
-
-  const seek = useCallback(
-    (delta: number) => {
-      if (!walkthrough) return;
-      const next = Math.max(
-        0,
-        Math.min(segIndex + delta, walkthrough.segments.length - 1)
-      );
-      if (next !== segIndex) send({ type: "progress", segmentIndex: next });
-    },
-    [walkthrough, segIndex, send]
-  );
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
-      if (e.code === "Space") {
-        e.preventDefault();
-        togglePlayPause();
-      } else if (e.code === "ArrowRight") seek(1);
-      else if (e.code === "ArrowLeft") seek(-1);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlayPause, seek]);
-
-  if (state.noWalkthrough) {
+  if (!presentation || !playback) {
     return (
-      <div className="centered-screen">
-        <h2>No walkthrough yet</h2>
-        <p>Ask Claude to walk you through a changeset, then come back here.</p>
-      </div>
-    );
-  }
-  if (!walkthrough || !playback || !segment) {
-    return (
-      <div className="centered-screen">
-        <h2>{state.connected ? "Loading walkthrough…" : "Connecting…"}</h2>
+      <div className="app app-empty">
+        <p>Waiting for a presentation…</p>
       </div>
     );
   }
 
-  const audioPending = !segment.audioFile;
-  const showOverlayStart = !started;
+  const index = Math.min(playback.currentSegmentIndex, segments.length - 1);
+  const segment = segments[index];
+
+  const onNarrationEnded = () => {
+    if (index < segments.length - 1) goTo(index + 1);
+    else send({ type: "control", action: "completed" });
+  };
 
   return (
     <div className="app">
-      <header className="topbar">
-        <span className="wt-title">{walkthrough.title}</span>
-        <span className="seg-title">{segment.title}</span>
-        <span className={`claude-dot ${playback.claudeConnected ? "on" : "off"}`}>
-          {playback.claudeConnected ? "Claude connected" : "Claude offline"}
-        </span>
-      </header>
-
-      {!state.connected && (
-        <div className="banner warn">Reconnecting to walkthrough server…</div>
-      )}
-      {!playback.claudeConnected && status === "question_pending" && (
-        <div className="banner warn">
-          Claude isn't connected — your question is queued until the session
-          reconnects.
+      <AudioController
+        presentationId={presentation.id}
+        audioFile={segment.audioFile}
+        status={playback.status}
+        voiceSpeed={presentation.settings.voiceSpeed}
+        demo={view.demo}
+        answer={view.incomingAnswer}
+        onNarrationEnded={onNarrationEnded}
+      />
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <span className="intent-badge">
+            {INTENT_LABEL[presentation.intent] ?? "Presentation"}
+          </span>
+          <h2 className="pres-title">{presentation.title}</h2>
+          <SettingsBadges settings={presentation.settings} />
         </div>
-      )}
+        <Toc
+          segments={segments}
+          toc={toc}
+          activeIndex={index}
+          onJump={goTo}
+        />
+      </aside>
 
-      <main className="stage">
-        <VisualStage key={segment.id} visual={segment.visual} />
-        {audioPending && (
-          <div className="audio-pending">generating narration audio…</div>
+      <main className="stage-wrap">
+        <div className="stage">
+          <VisualStage visual={segment.visual} />
+        </div>
+
+        <Narration text={segment.narration} />
+
+        <Transport
+          index={index}
+          total={segments.length}
+          status={playback.status}
+          onPrev={() => goTo(Math.max(0, index - 1))}
+          onNext={() => goTo(Math.min(segments.length - 1, index + 1))}
+          onPlayPause={() =>
+            send({
+              type: "control",
+              action: playback.status === "playing" ? "pause" : "play",
+            })
+          }
+        />
+
+        <AskPanel
+          playback={playback}
+          incomingAnswer={view.incomingAnswer}
+          disabled={view.demo}
+          onAsk={(text) =>
+            send({ type: "question", text, segmentId: segment.id })
+          }
+          onResume={() => send({ type: "control", action: "resume" })}
+          onDismissAnswer={clearAnswer}
+        />
+
+        {view.demo && (
+          <div className="demo-banner">
+            Demo mode — local preview, no audio or Claude. Open with{" "}
+            <code>?p=&lt;id&gt;</code> for a live session.
+          </div>
         )}
       </main>
+    </div>
+  );
+}
 
-      <AskPanel
-        visible={
-          status === "paused" ||
-          status === "question_pending" ||
-          status === "answering" ||
-          status === "completed"
-        }
-        status={status}
-        pendingQuestion={playback.pendingQuestion}
-        answer={playback.lastAnswer}
-        onAsk={(text) => send({ type: "question", text, segmentId: segment.id })}
-        onResume={() => {
-          answerRef.current?.pause();
-          send({ type: "control", action: "resume" });
-        }}
+function AudioController({
+  presentationId,
+  audioFile,
+  status,
+  voiceSpeed,
+  demo,
+  answer,
+  onNarrationEnded,
+}: {
+  presentationId: string;
+  audioFile: string | undefined;
+  status: string;
+  voiceSpeed: number;
+  demo: boolean;
+  answer: Answer | null;
+  onNarrationEnded: () => void;
+}) {
+  const narrationRef = useRef<HTMLAudioElement>(null);
+  const answerRef = useRef<HTMLAudioElement>(null);
+  const src = !demo && audioFile ? `/audio/${presentationId}/${audioFile}` : null;
+
+  // Play/pause narration in lockstep with the server-driven status.
+  useEffect(() => {
+    const a = narrationRef.current;
+    if (!a || !src) return;
+    a.playbackRate = voiceSpeed;
+    if (status === "playing") {
+      void a.play().catch(() => {});
+    } else {
+      a.pause();
+    }
+  }, [src, status, voiceSpeed]);
+
+  // Speak an answer the moment it arrives, pausing narration first.
+  useEffect(() => {
+    const a = answerRef.current;
+    if (!a || !answer?.audioUrl) return;
+    narrationRef.current?.pause();
+    a.src = answer.audioUrl;
+    a.playbackRate = voiceSpeed;
+    void a.play().catch(() => {});
+  }, [answer?.audioUrl, voiceSpeed]);
+
+  if (demo) return null;
+  return (
+    <>
+      <audio
+        ref={narrationRef}
+        src={src ?? undefined}
+        onEnded={onNarrationEnded}
+        preload="auto"
       />
+      <audio ref={answerRef} preload="auto" />
+    </>
+  );
+}
 
-      <footer className="transport">
-        <button onClick={() => seek(-1)} title="Previous segment (←)">
-          ⏮
-        </button>
-        <button
-          className="play-btn"
-          onClick={togglePlayPause}
-          title="Play/Pause (space)"
-        >
-          {status === "playing" ? "⏸" : "▶"}
-        </button>
-        <button onClick={() => seek(1)} title="Next segment (→)">
-          ⏭
-        </button>
-        <div className="dots">
-          {walkthrough.segments.map((s, i) => (
+function SettingsBadges({
+  settings,
+}: {
+  settings: { verbosity: string; depth: string; audience: string };
+}) {
+  return (
+    <div className="settings-badges">
+      <span>{settings.audience}</span>
+      <span>{settings.verbosity}</span>
+      <span>{settings.depth}</span>
+    </div>
+  );
+}
+
+function Toc({
+  segments,
+  toc,
+  activeIndex,
+  onJump,
+}: {
+  segments: Segment[];
+  toc: ReturnType<typeof deriveTocGroups>;
+  activeIndex: number;
+  onJump: (index: number) => void;
+}) {
+  // With sections, show grouped headers; otherwise a flat list of segments.
+  if (toc.length === 0) {
+    return (
+      <ol className="toc toc-flat">
+        {segments.map((s, i) => (
+          <li key={s.id}>
             <button
-              key={s.id}
-              className={`dot ${i === segIndex ? "current" : ""} ${
-                playback.audioReady.includes(s.id) ? "ready" : ""
-              }`}
-              title={s.title}
-              onClick={() => send({ type: "progress", segmentIndex: i })}
-            />
-          ))}
-        </div>
-        <span className="counter">
-          {segIndex + 1} / {walkthrough.segments.length}
-        </span>
-      </footer>
+              className={i === activeIndex ? "active" : ""}
+              onClick={() => onJump(i)}
+            >
+              {s.title}
+            </button>
+          </li>
+        ))}
+      </ol>
+    );
+  }
 
-      {showOverlayStart && (
-        <div className="start-overlay" onClick={togglePlayPause}>
-          <button className="start-btn">▶ Start walkthrough</button>
-          <p>space to pause · ← → to skip · ask questions while paused</p>
+  return (
+    <div className="toc toc-sectioned">
+      {toc.map((g, gi) => (
+        <div key={gi} className="toc-group">
+          <div className="toc-group-label">{g.label}</div>
+          <ol>
+            {g.segmentIds.map((id, j) => {
+              const i = g.startIndex + j;
+              return (
+                <li key={id}>
+                  <button
+                    className={i === activeIndex ? "active" : ""}
+                    onClick={() => onJump(i)}
+                  >
+                    {segments[i].title}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
         </div>
-      )}
+      ))}
+    </div>
+  );
+}
 
-      <audio ref={narrationRef} onEnded={onNarrationEnded} />
-      <audio ref={answerRef} />
+function Narration({ text }: { text: string }) {
+  return <p className="narration">{text}</p>;
+}
+
+function Transport({
+  index,
+  total,
+  status,
+  onPrev,
+  onNext,
+  onPlayPause,
+}: {
+  index: number;
+  total: number;
+  status: string;
+  onPrev: () => void;
+  onNext: () => void;
+  onPlayPause: () => void;
+}) {
+  return (
+    <div className="transport">
+      <button onClick={onPrev} disabled={index === 0} aria-label="Previous">
+        ◀
+      </button>
+      <button onClick={onPlayPause} aria-label="Play or pause">
+        {status === "playing" ? "❚❚" : "▶"}
+      </button>
+      <button
+        onClick={onNext}
+        disabled={index === total - 1}
+        aria-label="Next"
+      >
+        ▶
+      </button>
+      <span className="transport-counter">
+        {index + 1} / {total}
+      </span>
     </div>
   );
 }

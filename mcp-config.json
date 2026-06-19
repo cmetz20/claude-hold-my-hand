@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "walkthrough": {
+    "claude-hold-my-hand": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/plugin-dist/server.mjs"]
     }

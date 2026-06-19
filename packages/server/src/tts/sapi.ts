@@ -21,7 +21,7 @@ export class SapiEngine implements TtsEngine {
   async synthesize(text: string, outWavPath: string): Promise<void> {
     const tmp = path.join(
       os.tmpdir(),
-      `chmh-tts-${crypto.randomBytes(6).toString("hex")}.txt`
+      `chmh-tts-${crypto.randomBytes(6).toString("hex")}.txt`,
     );
     await fs.writeFile(tmp, text, "utf8");
     const script = [
@@ -38,7 +38,7 @@ export class SapiEngine implements TtsEngine {
         const child = spawn(
           "powershell.exe",
           ["-NoProfile", "-NonInteractive", "-Command", script],
-          { stdio: ["ignore", "ignore", "pipe"] }
+          { stdio: ["ignore", "ignore", "pipe"] },
         );
         let stderr = "";
         child.stderr.on("data", (d) => (stderr += d));
@@ -46,7 +46,9 @@ export class SapiEngine implements TtsEngine {
         child.on("close", (code) =>
           code === 0
             ? resolve()
-            : reject(new Error(`SAPI TTS exited ${code}: ${stderr.slice(0, 500)}`))
+            : reject(
+                new Error(`SAPI TTS exited ${code}: ${stderr.slice(0, 500)}`),
+              ),
         );
       });
     } finally {
